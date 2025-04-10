@@ -41,12 +41,18 @@ CONFLUENCE_EMAIL = os.getenv("CONFLUENCE_EMAIL")
 CONFLUENCE_TOKEN = os.getenv("CONFLUENCE_TOKEN")
 APPSFLYER_TOKEN = os.getenv("APPSFLYER_TOKEN")
 
-# Load API keys from environment with error handling
+# Load API keys from environment with robust error handling
 def load_api_keys():
     try:
         api_keys_json = os.getenv("DASH_API_KEYS", "{}").strip()
-        if api_keys_json.startswith('"') and api_keys_json.endswith('"'):
+        
+        # Remove surrounding quotes if they exist
+        if (api_keys_json.startswith('"') and api_keys_json.endswith('"')) or \
+           (api_keys_json.startswith("'") and api_keys_json.endswith("'")):
             api_keys_json = api_keys_json[1:-1]
+        
+        # Replace escaped quotes if they exist
+        api_keys_json = api_keys_json.replace('\\"', '"')
         
         keys_dict = json.loads(api_keys_json)
         
@@ -54,27 +60,20 @@ def load_api_keys():
         for name, key in keys_dict.items():
             api_keys[name] = {
                 'original': key.strip(),
-                'hashed': None
+                'hashed': hashlib.sha256(key.strip().encode()).hexdigest()
             }
         return api_keys
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error loading API keys: {str(e)}")
+        print(f"Problematic JSON string: {api_keys_json}")
+        return {}
     except Exception as e:
         print(f"ERROR loading API keys: {str(e)}")
         return {}
 
 DASH_API_KEYS = load_api_keys()
-print(f"Loaded API keys: {[name for name in DASH_API_KEYS]}")
+print(f"Loaded {len(DASH_API_KEYS)} API keys")
 
-def validate_api_key(api_key):
-    if not api_key:
-        return False
-        
-    api_key = api_key.strip()
-    
-    for key_data in DASH_API_KEYS.values():
-        if api_key == key_data['original']:
-            return True
-    return False
-    
 # IP Whitelist
 ALLOWED_IPS = {
     '127.0.0.1',
@@ -106,6 +105,19 @@ class User(UserMixin):
         self.id = id
         self.email = email
 
+# API Key Validation
+def validate_api_key(api_key):
+    if not api_key:
+        return False
+        
+    api_key = api_key.strip()
+    hashed_input = hashlib.sha256(api_key.encode()).hexdigest()
+    
+    for key_data in DASH_API_KEYS.values():
+        if api_key == key_data['original'] or hashed_input == key_data['hashed']:
+            return True
+    return False
+
 # IP Restriction Decorator
 def ip_restricted(f):
     def decorated_function(*args, **kwargs):
@@ -126,7 +138,12 @@ def ip_restricted(f):
             return jsonify({
                 "message": "Invalid API key",
                 "status": "failed",
-                "hint": "Check your API key or contact admin"
+                "hint": "Check your API key or contact admin",
+                "debug_info": {
+                    "provided_key": api_key,
+                    "hashed_provided": hashlib.sha256(api_key.encode()).hexdigest(),
+                    "valid_keys": {k: v['hashed'] for k, v in DASH_API_KEYS.items()}
+                }
             }), 403
         
         return f(*args, **kwargs)
@@ -138,7 +155,7 @@ def debug_keys():
     return jsonify({
         "loaded_keys": {name: data['original'] for name, data in DASH_API_KEYS.items()},
         "env_value": os.getenv("DASH_API_KEYS"),
-        "note": "Keys are stored hashed for security"
+        "note": "This endpoint should be removed in production"
     })
 
 @app.route('/api/test_auth', methods=['POST'])
@@ -151,17 +168,6 @@ def test_auth():
         "is_valid": is_valid,
         "client_ip": request.remote_addr,
         "ip_allowed": request.remote_addr in ALLOWED_IPS
-    })
-
-@app.route('/api/debug/verify_key', methods=['POST'])
-def verify_key():
-    data = request.get_json()
-    api_key = data.get('api_key', '').strip()
-    is_valid = api_key in DASH_API_KEYS.values()
-    return jsonify({
-        "key_provided": api_key,
-        "is_valid": is_valid,
-        "matched_key": next((k for k, v in DASH_API_KEYS.items() if v == api_key), None)
     })
 
 @login_manager.user_loader
@@ -588,7 +594,6 @@ def dashboard():
                          urls=urls,
                          roles=roles)
 
-
 @app.route('/api/login_user', methods=['POST'])
 @ip_restricted
 def login_user_api():
@@ -609,7 +614,7 @@ def login_user_api():
             host=MYSQL_HOST,
             user=MYSQL_USER,
             password=MYSQL_PASSWORD,
-            database=data['platform'].lower()
+            database=data['platform']
         )
         cursor = conn.cursor(dictionary=True)
         
@@ -685,7 +690,6 @@ def login_user_api():
             "status": "error",
             "message": f"Unexpected error: {str(e)}"
         }), 500
-
 
 @app.route('/download_csv')
 @login_required
